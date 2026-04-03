@@ -27,7 +27,7 @@ interface DashboardData {
   aoByMonth: Array<{ mois: number; ao: { ca: number; margeBrute: number | null; nbOps: number }; horsAo: { ca: number; margeBrute: number | null; nbOps: number } }>
   aoByAnnee: Array<{ annee: number; ao: { ca: number; margeBrute: number | null; nbOps: number }; horsAo: { ca: number; margeBrute: number | null; nbOps: number } }>
   multiYearMonthly: Array<{ annee: number; monthly: Array<{ mois: number; margeBrute: number | null; margeExterne: number | null; ca: number }> }>
-  cadenceByZone: Array<{ type_zone: string; nb_ops: number; cadence_moy: number; cadence_min: number; cadence_max: number }>
+  cadenceByZone: Array<{ type_zone: string; poids_document: string | null; nb_ops: number; cadence_moy: number; cadence_min: number; cadence_max: number }>
 }
 
 export default function Dashboard() {

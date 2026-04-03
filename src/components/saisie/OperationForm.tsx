@@ -59,8 +59,22 @@ interface FormData {
   cadence: CadenceForm
 }
 
+function newId(): string {
+  const c = globalThis.crypto as Crypto | undefined
+  if (c && 'randomUUID' in c && typeof c.randomUUID === 'function') return c.randomUUID()
+  if (c && typeof c.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16)
+    c.getRandomValues(bytes)
+    bytes[6] = (bytes[6] & 0x0f) | 0x40
+    bytes[8] = (bytes[8] & 0x3f) | 0x80
+    const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0'))
+    return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10, 16).join('')}`
+  }
+  return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`
+}
+
 function newLigne(): LigneForm {
-  return { id: crypto.randomUUID(), type: 'AGENT', intitule: '', nb_heures: '', taux_horaire: '', cout_fixe: '' }
+  return { id: newId(), type: 'AGENT', intitule: '', nb_heures: '', taux_horaire: '', cout_fixe: '' }
 }
 
 function parseLigne(l: LigneForm) {
@@ -169,7 +183,7 @@ export default function OperationForm({ initialData }: Props) {
         prix_vente_ht: String(initialData.prix_vente_ht),
         notes: initialData.notes ?? '',
         lignes: initialData.lignes.map(l => ({
-          id: crypto.randomUUID(),
+          id: newId(),
           type: l.type as LigneForm['type'],
           intitule: l.intitule,
           nb_heures: l.nb_heures !== null ? String(l.nb_heures) : '',
