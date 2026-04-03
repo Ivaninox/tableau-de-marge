@@ -7,11 +7,13 @@ interface Props { params: Promise<{ id: string }> }
 
 export default async function EditOperationPage({ params }: Props) {
   const { id } = await params
-  const db = getDb()
-  const op = db.prepare('SELECT * FROM operations WHERE id = ?').get(id) as Operation | undefined
+  const db = await getDb()
+  const opRes = await db.query<Operation>('SELECT * FROM operations WHERE id = $1', [id])
+  const op = opRes.rows[0]
   if (!op) notFound()
 
-  const lignes = db.prepare('SELECT * FROM lignes_couts WHERE operation_id = ? ORDER BY id').all(id) as LigneCout[]
+  const lignesRes = await db.query<LigneCout>('SELECT * FROM lignes_couts WHERE operation_id = $1 ORDER BY id', [id])
+  const lignes = lignesRes.rows
 
   return (
     <div>

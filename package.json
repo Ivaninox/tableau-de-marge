@@ -9,18 +9,19 @@
     "import": "tsx scripts/import.ts"
   },
   "dependencies": {
-    "better-sqlite3": "^11.5.0",
     "clsx": "^2.1.1",
+    "dotenv": "^16.4.5",
     "drizzle-orm": "^0.31.2",
     "next": "^15.2.4",
+    "pg": "^8.12.0",
     "react": "^18",
     "react-dom": "^18",
     "recharts": "^2.12.7",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.10",
     "@types/node": "^20",
+    "@types/pg": "^8.11.10",
     "@types/react": "^18",
     "@types/react-dom": "^18",
     "autoprefixer": "^10.4.27",

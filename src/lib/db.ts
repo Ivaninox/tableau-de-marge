@@ -1,5 +1,4 @@
-import path from 'path'
-import fs from 'fs'
+import { Pool } from 'pg'
 
 // Types only — no top-level DB initialization to avoid webpack issues
 export interface Operation {
@@ -38,68 +37,52 @@ export interface OperationWithLignes extends Operation {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let _db: any = null
+let _db: Pool | null = null
+let _init: Promise<void> | null = null
 
-export function getDb() {
-  if (_db) return _db
-
-  // Use require() so webpack does not attempt to bundle better-sqlite3
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const Database = require('better-sqlite3')
-
-  const DATA_DIR = path.join(process.cwd(), 'data')
-  const DB_PATH = path.join(DATA_DIR, 'marges.db')
-
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true })
-  }
-
-  _db = new Database(DB_PATH)
-  _db.pragma('journal_mode = WAL')
-  _db.pragma('foreign_keys = ON')
-
-  _db.exec(`
+async function initDb(db: Pool) {
+  await db.query(`
     CREATE TABLE IF NOT EXISTS operations (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id BIGSERIAL PRIMARY KEY,
       code TEXT UNIQUE NOT NULL,
       mois INTEGER NOT NULL CHECK(mois BETWEEN 1 AND 12),
       annee INTEGER NOT NULL,
       client TEXT NOT NULL,
       is_ao INTEGER NOT NULL DEFAULT 0,
-      prix_vente_ht REAL NOT NULL DEFAULT 0,
+      prix_vente_ht DOUBLE PRECISION NOT NULL DEFAULT 0,
       notes TEXT,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
     CREATE TABLE IF NOT EXISTS lignes_couts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      operation_id INTEGER NOT NULL REFERENCES operations(id) ON DELETE CASCADE,
+      id BIGSERIAL PRIMARY KEY,
+      operation_id BIGINT NOT NULL REFERENCES operations(id) ON DELETE CASCADE,
       type TEXT NOT NULL CHECK(type IN ('CDI', 'AGENT', 'SUPPORT', 'DEPLACEMENT')),
       intitule TEXT NOT NULL,
-      nb_heures REAL,
-      taux_horaire REAL,
-      cout_fixe REAL,
-      created_at TEXT DEFAULT (datetime('now'))
+      nb_heures DOUBLE PRECISION,
+      taux_horaire DOUBLE PRECISION,
+      cout_fixe DOUBLE PRECISION,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
     CREATE TABLE IF NOT EXISTS cdi_agents (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id BIGSERIAL PRIMARY KEY,
       prenom TEXT UNIQUE NOT NULL,
-      date_debut TEXT NOT NULL,
-      date_fin TEXT
+      date_debut DATE NOT NULL,
+      date_fin DATE
     );
 
     CREATE TABLE IF NOT EXISTS cadences (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      operation_id INTEGER NOT NULL UNIQUE REFERENCES operations(id) ON DELETE CASCADE,
-      superficie REAL,
+      id BIGSERIAL PRIMARY KEY,
+      operation_id BIGINT NOT NULL UNIQUE REFERENCES operations(id) ON DELETE CASCADE,
+      superficie DOUBLE PRECISION,
       type_zone TEXT,
       nb_flyers INTEGER,
-      nb_heures REAL,
+      nb_heures DOUBLE PRECISION,
       poids_document TEXT,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
     CREATE INDEX IF NOT EXISTS idx_operations_annee ON operations(annee);
@@ -108,17 +91,27 @@ export function getDb() {
     CREATE INDEX IF NOT EXISTS idx_cadences_operation ON cadences(operation_id);
   `)
 
-  // Migrations : ajout de colonnes manquantes sur les bases existantes
-  const cadenceCols = (_db.prepare("PRAGMA table_info(cadences)").all() as { name: string }[]).map(r => r.name)
-  if (!cadenceCols.includes('poids_document')) {
-    _db.exec("ALTER TABLE cadences ADD COLUMN poids_document TEXT")
-  }
-
-  // Seed CDI agents on first run
-  const count = (_db.prepare('SELECT COUNT(*) as n FROM cdi_agents').get() as { n: number }).n
+  const { rows } = await db.query<{ n: string }>('SELECT COUNT(*)::text as n FROM cdi_agents')
+  const count = Number(rows[0]?.n ?? 0)
   if (count === 0) {
-    _db.prepare("INSERT OR IGNORE INTO cdi_agents (prenom, date_debut) VALUES ('Raouf', '2022-01-01'), ('Achraf', '2026-01-01')").run()
+    await db.query(
+      "INSERT INTO cdi_agents (prenom, date_debut) VALUES ('Raouf', '2022-01-01'), ('Achraf', '2026-01-01') ON CONFLICT (prenom) DO NOTHING"
+    )
+  }
+}
+
+export async function getDb() {
+  if (_db) return _db
+
+  const connectionString = process.env.DATABASE_URL
+  if (!connectionString) {
+    throw new Error('DATABASE_URL is missing. Add it to .env.local (dev) and Vercel environment variables (prod).')
   }
 
+  _db = new Pool({ connectionString })
+  if (!_init) {
+    _init = initDb(_db)
+  }
+  await _init
   return _db
 }

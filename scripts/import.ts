@@ -1,5 +1,5 @@
 /**
- * Import FFY Marges Excel → SQLite
+ * Import FFY Marges Excel → Neon Postgres
  *
  * Gère deux formats :
  *
@@ -17,10 +17,14 @@
  *   npm run import -- --file=./FFY_Marges_v8.xlsx --file=./"Marges avec AO - 2025.xlsx" --file=./"Marges 2024.xlsx" --file=./"Marges 2022 - 2023.xlsx" --reset
  */
 
+import dotenv from 'dotenv'
 import * as XLSX from 'xlsx'
-import Database from 'better-sqlite3'
+import { Pool, PoolClient } from 'pg'
 import path from 'path'
 import fs from 'fs'
+
+dotenv.config({ path: '.env.local' })
+dotenv.config()
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -66,9 +70,7 @@ const AO_PREFIXES = ['PESS', 'GIF', 'MEL']
 
 function normType(v: string): 'CDI' | 'AGENT' | 'SUPPORT' | 'DEPLACEMENT' {
   const s = v.trim().toLowerCase()
-  // Correspondance exacte
   if (TYPE_MAP[s]) return TYPE_MAP[s] as 'CDI' | 'AGENT' | 'SUPPORT' | 'DEPLACEMENT'
-  // Correspondance partielle
   for (const [k, t] of Object.entries(TYPE_MAP)) {
     if (s.includes(k)) return t as 'CDI' | 'AGENT' | 'SUPPORT' | 'DEPLACEMENT'
   }
@@ -106,25 +108,20 @@ function codeToYear(code: string): number | null {
 
 function normalizeRawCode(raw: string): string {
   let c = raw.replace(/\n[\s\S]*/g, '').trim()
-  // "CODE ( Sn )" → "CODESn"
   const weekMatch = c.match(/^([A-Z0-9]+)\s*\(\s*S(\d+)\s*\)\s*$/i)
   if (weekMatch) return (weekMatch[1] + 'S' + weekMatch[2]).toUpperCase()
-  // "CODE (BIS)" ou "CODE ( BIS )" → "CODEBIS"
   const parenAlpha = c.match(/^(.+?)\s+\(\s*([A-Z]{1,5})\s*\)$/i)
   if (parenAlpha) {
     c = parenAlpha[1].trim() + parenAlpha[2].toUpperCase()
   } else {
-    // Qualifier court alpha (1-4 lettres) après " - " → intégré : "HUM0326 - BIS" → "HUM0326BIS"
     const qualMatch = c.match(/^(.+?)\s+[–-]\s+([A-Z]{1,4})$/i)
     if (qualMatch) {
       c = qualMatch[1] + qualMatch[2].toUpperCase()
     } else {
-      // Référence numérique après " - " (ex: "OBAL225 - 30692") → inclure comme suffixe "R..." pour garder l'unicité
       const numRefMatch = c.match(/^([A-Za-z][A-Za-z0-9]*\d)\s+[-–]\s+(\d[\d\s]*)$/)
       if (numRefMatch) {
         c = numRefMatch[1].trim() + 'R' + numRefMatch[2].replace(/\s/g, '')
       } else {
-        // Lieu ou nom long après " - " (ex: "OSWB0425 - Huningue") → 3 premières lettres du lieu
         const locMatch = c.match(/^([A-Za-z][A-Za-z0-9]*\d)\s+[-–]\s+([A-Za-zÀ-ÿ]{2,})$/)
         if (locMatch) {
           const loc = locMatch[2].replace(/[^A-Za-z]/g, '').substring(0, 3).toUpperCase()
@@ -135,7 +132,6 @@ function normalizeRawCode(raw: string): string {
       }
     }
   }
-  // Strip suffixe numérique après tiret sans espace (numéro de référence collé)
   c = c.replace(/-\d[\d\s]*$/, '').trim()
   return c.replace(/[^A-Z0-9]/g, '')
 }
@@ -150,82 +146,87 @@ function extractClientFromCode(code: string): string {
 
 // ─── Base de données ───────────────────────────────────────────────────────────
 
-function setupDb(dbPath: string, reset: boolean) {
-  const db = new Database(dbPath)
-  db.pragma('journal_mode = WAL')
-  db.pragma('foreign_keys = OFF')
+async function setupDb(pool: Pool, reset: boolean) {
+  const client = await pool.connect()
+  try {
+    if (reset) {
+      console.log('🗑️   --reset : suppression des données existantes...\n')
+      await client.query(`
+        DROP TABLE IF EXISTS cadences;
+        DROP TABLE IF EXISTS lignes_couts;
+        DROP TABLE IF EXISTS operations;
+        DROP TABLE IF EXISTS cdi_agents;
+      `)
+    }
 
-  if (reset) {
-    console.log('🗑️   --reset : suppression des données existantes...\n')
-    db.exec(`
-      DROP TABLE IF EXISTS lignes_couts;
-      DROP TABLE IF EXISTS operations;
-      DROP TABLE IF EXISTS cdi_agents;
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS operations (
+        id BIGSERIAL PRIMARY KEY,
+        code TEXT UNIQUE NOT NULL,
+        mois INTEGER NOT NULL CHECK(mois BETWEEN 1 AND 12),
+        annee INTEGER NOT NULL,
+        client TEXT NOT NULL,
+        is_ao INTEGER NOT NULL DEFAULT 0,
+        prix_vente_ht DOUBLE PRECISION NOT NULL DEFAULT 0,
+        notes TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS lignes_couts (
+        id BIGSERIAL PRIMARY KEY,
+        operation_id BIGINT NOT NULL REFERENCES operations(id) ON DELETE CASCADE,
+        type TEXT NOT NULL CHECK(type IN ('CDI', 'AGENT', 'SUPPORT', 'DEPLACEMENT')),
+        intitule TEXT NOT NULL,
+        nb_heures DOUBLE PRECISION,
+        taux_horaire DOUBLE PRECISION,
+        cout_fixe DOUBLE PRECISION,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS cdi_agents (
+        id BIGSERIAL PRIMARY KEY,
+        prenom TEXT UNIQUE NOT NULL,
+        date_debut DATE NOT NULL,
+        date_fin DATE
+      );
+
+      CREATE TABLE IF NOT EXISTS cadences (
+        id BIGSERIAL PRIMARY KEY,
+        operation_id BIGINT NOT NULL UNIQUE REFERENCES operations(id) ON DELETE CASCADE,
+        superficie DOUBLE PRECISION,
+        type_zone TEXT,
+        nb_flyers INTEGER,
+        nb_heures DOUBLE PRECISION,
+        poids_document TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_operations_annee ON operations(annee);
+      CREATE INDEX IF NOT EXISTS idx_operations_mois ON operations(mois, annee);
+      CREATE INDEX IF NOT EXISTS idx_lignes_operation ON lignes_couts(operation_id);
+      CREATE INDEX IF NOT EXISTS idx_cadences_operation ON cadences(operation_id);
     `)
+
+    const { rows } = await client.query<{ n: string }>('SELECT COUNT(*)::text as n FROM cdi_agents')
+    const count = Number(rows[0]?.n ?? 0)
+    if (count === 0) {
+      await client.query(
+        "INSERT INTO cdi_agents (prenom, date_debut) VALUES ('Raouf', '2022-01-01'), ('Achraf', '2026-01-01') ON CONFLICT (prenom) DO NOTHING"
+      )
+    }
+  } finally {
+    client.release()
   }
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS operations (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      code TEXT UNIQUE NOT NULL,
-      mois INTEGER NOT NULL CHECK(mois BETWEEN 1 AND 12),
-      annee INTEGER NOT NULL,
-      client TEXT NOT NULL,
-      is_ao INTEGER NOT NULL DEFAULT 0,
-      prix_vente_ht REAL NOT NULL DEFAULT 0,
-      notes TEXT,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS lignes_couts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      operation_id INTEGER NOT NULL REFERENCES operations(id) ON DELETE CASCADE,
-      type TEXT NOT NULL CHECK(type IN ('CDI','AGENT','SUPPORT','DEPLACEMENT')),
-      intitule TEXT NOT NULL,
-      nb_heures REAL,
-      taux_horaire REAL,
-      cout_fixe REAL,
-      created_at TEXT DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS cdi_agents (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      prenom TEXT UNIQUE NOT NULL,
-      date_debut TEXT NOT NULL,
-      date_fin TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_operations_annee ON operations(annee);
-    CREATE INDEX IF NOT EXISTS idx_lignes_operation ON lignes_couts(operation_id);
-  `)
-
-  const cnt = (db.prepare('SELECT COUNT(*) as n FROM cdi_agents').get() as { n: number }).n
-  if (cnt === 0) {
-    db.prepare("INSERT OR IGNORE INTO cdi_agents (prenom, date_debut) VALUES ('Raouf', '2022-01-01'), ('Achraf', '2026-01-01')").run()
-  }
-
-  return db
 }
 
 // ─── Traitement FORMAT A (FFY_Marges_v8.xlsx) ─────────────────────────────────
 
-function processFFYFile(workbook: XLSX.WorkBook, db: Database.Database, stats: Stats) {
+async function processFFYFile(workbook: XLSX.WorkBook, pool: Pool, stats: Stats) {
   const targetSheets = workbook.SheetNames.filter(n =>
     n.startsWith('📋 Saisie') || n.startsWith('📋 AO') || n.startsWith('📋 Archives')
   )
-
-  const upsertOp = db.prepare(`
-    INSERT INTO operations (code, mois, annee, client, is_ao, prix_vente_ht)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(code) DO UPDATE SET
-      prix_vente_ht = CASE WHEN excluded.prix_vente_ht > 0 THEN excluded.prix_vente_ht ELSE prix_vente_ht END,
-      client = CASE WHEN client = 'Inconnu' THEN excluded.client ELSE client END,
-      updated_at = datetime('now')
-  `)
-  const getOpId = db.prepare('SELECT id FROM operations WHERE code = ?')
-  const deleteLignes = db.prepare('DELETE FROM lignes_couts WHERE operation_id = ?')
-  const insertLigne = db.prepare(`
-    INSERT INTO lignes_couts (operation_id, type, intitule, nb_heures, taux_horaire, cout_fixe)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `)
 
   for (const sheetName of targetSheets) {
     const isAo = sheetName.includes('AO')
@@ -263,7 +264,10 @@ function processFFYFile(workbook: XLSX.WorkBook, db: Database.Database, stats: S
     const processedCodes = new Set<string>()
     let currentMois = 0
 
-    const importSheet = db.transaction(() => {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+
       for (let i = dataStartRow; i < rows.length; i++) {
         const row = rows[i] as unknown[]
         if (!row || row.every(c => c === null || c === '')) continue
@@ -283,7 +287,7 @@ function processFFYFile(workbook: XLSX.WorkBook, db: Database.Database, stats: S
         const mois = codeToMois(code) ?? currentMois
         if (mois < 1 || mois > 12) continue
 
-        const client = isAo
+        const clientName = isAo
           ? (sheetName.match(/AO\s*[—-]\s*(.+)$/)?.[1]?.trim() ?? extractClientFromCode(code))
           : extractClientFromCode(code)
         const venteHt = parseNum(row[8])
@@ -296,11 +300,30 @@ function processFFYFile(workbook: XLSX.WorkBook, db: Database.Database, stats: S
         const coutFixe = isHourly ? null : (coutLigne && coutLigne > 0 ? coutLigne : null)
 
         try {
-          upsertOp.run(code, mois, annee, client, isAo ? 1 : 0, venteHt ?? 0)
-          const opRow = getOpId.get(code) as { id: number }
-          if (!processedCodes.has(code)) { deleteLignes.run(opRow.id); processedCodes.add(code) }
+          await client.query(
+            `INSERT INTO operations (code, mois, annee, client, is_ao, prix_vente_ht)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT(code) DO UPDATE SET
+               prix_vente_ht = CASE WHEN excluded.prix_vente_ht > 0 THEN excluded.prix_vente_ht ELSE operations.prix_vente_ht END,
+               client = CASE WHEN operations.client = 'Inconnu' THEN excluded.client ELSE operations.client END,
+               updated_at = now()`,
+            [code, mois, annee, clientName, isAo ? 1 : 0, venteHt ?? 0]
+          )
+
+          const opRes = await client.query<{ id: string }>('SELECT id FROM operations WHERE code = $1', [code])
+          const opId = opRes.rows[0]!.id
+
+          if (!processedCodes.has(code)) {
+            await client.query('DELETE FROM lignes_couts WHERE operation_id = $1', [opId])
+            processedCodes.add(code)
+          }
+
           if (intitule && intitule !== 'Opé' && (isHourly || coutFixe)) {
-            insertLigne.run(opRow.id, type, intitule, nbH, isHourly ? taux : null, coutFixe)
+            await client.query(
+              `INSERT INTO lignes_couts (operation_id, type, intitule, nb_heures, taux_horaire, cout_fixe)
+               VALUES ($1, $2, $3, $4, $5, $6)`,
+              [opId, type, intitule, nbH, isHourly ? taux : null, coutFixe]
+            )
             stats.lignes++
           }
           stats.ops++
@@ -309,9 +332,15 @@ function processFFYFile(workbook: XLSX.WorkBook, db: Database.Database, stats: S
           if (stats.errors <= 3) console.error(`  ⚠️  ${code}: ${e}`)
         }
       }
-    })
 
-    importSheet()
+      await client.query('COMMIT')
+    } catch (e) {
+      await client.query('ROLLBACK')
+      throw e
+    } finally {
+      client.release()
+    }
+
     console.log(`   📄 "${sheetName}" — ${processedCodes.size} opérations`)
   }
 }
@@ -319,14 +348,14 @@ function processFFYFile(workbook: XLSX.WorkBook, db: Database.Database, stats: S
 // ─── Traitement FORMAT B (Tableau de Marges) ──────────────────────────────────
 
 interface TableauSection {
-  colMois: number   // colonne absolue du Mois
-  colCode: number   // colonne absolue du Code
-  colAgent: number  // colonne absolue de l'Agent/Frais
-  colNbH: number    // colonne absolue NbH
-  colTaux: number   // colonne absolue Taux
-  colCout: number   // colonne absolue Coût
-  colVente: number  // colonne absolue Vente HT
-  fallbackYear: number // année de secours quand le code ne contient pas l'année
+  colMois: number
+  colCode: number
+  colAgent: number
+  colNbH: number
+  colTaux: number
+  colCout: number
+  colVente: number
+  fallbackYear: number
 }
 
 function extractYearFromTitle(title: string): number | null {
@@ -334,38 +363,33 @@ function extractYearFromTitle(title: string): number | null {
   return m ? parseInt(m[1]) : null
 }
 
-function processTableauFile(
+async function processTableauFile(
   workbook: XLSX.WorkBook,
   sheetName: string,
-  db: Database.Database,
+  pool: Pool,
   stats: Stats,
   cdiPrenoms: string[],
 ) {
   const ws = workbook.Sheets[sheetName]
   const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, raw: true, defval: null })
 
-  // Détecte l'année de la section depuis les titres (row 1)
   const titleRow = rows[1] as unknown[] ?? []
   const leftTitle = String(titleRow[0] ?? '')
   const midTitle = String(titleRow[11] ?? '')
   const leftYear = extractYearFromTitle(leftTitle) ?? new Date().getFullYear()
   const midYear = extractYearFromTitle(midTitle) ?? leftYear
 
-  // Détecte si le fichier a deux sections (ex: "Marges 2022 - 2023")
   const isDual = midYear !== leftYear
 
-  // Structure standard : mois=0, code=1, agent=2, nbH=3, taux=4, cout=5, vente=7
   const sections: TableauSection[] = [
     { colMois: 0, colCode: 1, colAgent: 2, colNbH: 3, colTaux: 4, colCout: 5, colVente: 7, fallbackYear: leftYear },
   ]
   if (isDual) {
-    // Section droite (2023) : mois=11, code=12, agent=13, nbH=14, taux=15, cout=16, vente=18
     sections.push(
       { colMois: 11, colCode: 12, colAgent: 13, colNbH: 14, colTaux: 15, colCout: 16, colVente: 18, fallbackYear: midYear }
     )
   }
 
-  // Trouve la première ligne de données réelles (pas template, pas header)
   let dataStartRow = 10
   for (let i = 8; i < 15; i++) {
     const row = rows[i] as unknown[]
@@ -379,36 +403,22 @@ function processTableauFile(
     }
   }
 
-  const upsertOp = db.prepare(`
-    INSERT INTO operations (code, mois, annee, client, is_ao, prix_vente_ht)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(code) DO UPDATE SET
-      prix_vente_ht = CASE WHEN excluded.prix_vente_ht > 0 THEN excluded.prix_vente_ht ELSE prix_vente_ht END,
-      client = CASE WHEN client = 'Inconnu' THEN excluded.client ELSE client END,
-      updated_at = datetime('now')
-  `)
-  const getOpId = db.prepare('SELECT id FROM operations WHERE code = ?')
-  const deleteLignes = db.prepare('DELETE FROM lignes_couts WHERE operation_id = ?')
-  const insertLigne = db.prepare(`
-    INSERT INTO lignes_couts (operation_id, type, intitule, nb_heures, taux_horaire, cout_fixe)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `)
-
   for (const section of sections) {
     const processedCodes = new Set<string>()
     let currentMois = 0
     let currentCode = ''
 
-    const importSection = db.transaction(() => {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+
       for (let i = dataStartRow; i < rows.length; i++) {
         const row = rows[i] as unknown[]
         if (!row) continue
 
-        // Mois
         const rawMois = row[section.colMois]
         if (rawMois) { const m = parseMois(rawMois); if (m > 0) currentMois = m }
 
-        // Code — nouveau code si col non-nulle
         const rawCode = String(row[section.colCode] ?? '').trim().replace(/\n[\s\S]*/g, '').trim()
         if (rawCode && rawCode !== 'XXX000' && rawCode.length >= 2) {
           const normalized = normalizeRawCode(rawCode.toUpperCase())
@@ -423,10 +433,8 @@ function processTableauFile(
         const mois = codeToMois(currentCode) ?? currentMois
         if (mois < 1 || mois > 12) continue
 
-        // VenteHT — seulement sur la ligne où le code apparaît (les autres = null)
         const venteHt = parseNum(row[section.colVente])
 
-        // Ligne de coût
         const intitule = String(row[section.colAgent] ?? '').trim().replace(/\n[\s\S]*/g, '').trim()
         if (!intitule || intitule === 'XXX000') continue
 
@@ -437,28 +445,40 @@ function processTableauFile(
         const coutFixe = isHourly ? null : (coutLine && coutLine > 0 ? coutLine : null)
         if (!isHourly && !coutFixe) continue
 
-        // Déterminer type (CDI si nom correspond à un agent CDI connu)
         const firstWord = intitule.split(/\s+/)[0].toLowerCase()
         const isCDI = cdiPrenoms.some(p => p.toLowerCase() === firstWord)
         const type = isCDI ? 'CDI' : normType(intitule)
 
-        // is_ao : détecté depuis le code
         const isAo = isAoCode(currentCode)
-        const client = extractClientFromCode(currentCode)
+        const clientName = extractClientFromCode(currentCode)
 
-        // N'utiliser venteHt que sur la première rencontre du code (ligne d'en-tête)
-        // Les occurrences suivantes du même code ne doivent pas écraser le prix
         const isFirstEncounter = !processedCodes.has(currentCode)
         const venteForUpsert = isFirstEncounter ? (venteHt ?? 0) : 0
 
         try {
-          upsertOp.run(currentCode, mois, annee, client, isAo ? 1 : 0, venteForUpsert)
-          const opRow = getOpId.get(currentCode) as { id: number }
+          await client.query(
+            `INSERT INTO operations (code, mois, annee, client, is_ao, prix_vente_ht)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT(code) DO UPDATE SET
+               prix_vente_ht = CASE WHEN excluded.prix_vente_ht > 0 THEN excluded.prix_vente_ht ELSE operations.prix_vente_ht END,
+               client = CASE WHEN operations.client = 'Inconnu' THEN excluded.client ELSE operations.client END,
+               updated_at = now()`,
+            [currentCode, mois, annee, clientName, isAo ? 1 : 0, venteForUpsert]
+          )
+
+          const opRes = await client.query<{ id: string }>('SELECT id FROM operations WHERE code = $1', [currentCode])
+          const opId = opRes.rows[0]!.id
+
           if (isFirstEncounter) {
-            deleteLignes.run(opRow.id)
+            await client.query('DELETE FROM lignes_couts WHERE operation_id = $1', [opId])
             processedCodes.add(currentCode)
           }
-          insertLigne.run(opRow.id, type, intitule, nbH, isHourly ? taux : null, coutFixe)
+
+          await client.query(
+            `INSERT INTO lignes_couts (operation_id, type, intitule, nb_heures, taux_horaire, cout_fixe)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [opId, type, intitule, nbH, isHourly ? taux : null, coutFixe]
+          )
           stats.ops++
           stats.lignes++
         } catch (e) {
@@ -466,9 +486,15 @@ function processTableauFile(
           if (stats.errors <= 3) console.error(`  ⚠️  ${currentCode}: ${e}`)
         }
       }
-    })
 
-    importSection()
+      await client.query('COMMIT')
+    } catch (e) {
+      await client.query('ROLLBACK')
+      throw e
+    } finally {
+      client.release()
+    }
+
     const label = section.colCode === 1 ? 'gauche' : 'droite'
     console.log(`   📄 "${sheetName}" [${label}] — ${processedCodes.size} opérations`)
   }
@@ -485,12 +511,18 @@ async function main() {
     process.exit(1)
   }
 
-  const DATA_DIR = path.join(process.cwd(), 'data')
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
-  const DB_PATH = path.join(DATA_DIR, 'marges.db')
+  const connectionString = process.env.DATABASE_URL
+  if (!connectionString) {
+    console.error('❌  DATABASE_URL is missing. Add it to .env.local (dev) or set it in your environment.')
+    process.exit(1)
+  }
 
-  const db = setupDb(DB_PATH, hasFlag('reset'))
-  const cdiAgents = (db.prepare('SELECT prenom FROM cdi_agents').all() as { prenom: string }[]).map(r => r.prenom)
+  const pool = new Pool({ connectionString })
+
+  await setupDb(pool, hasFlag('reset'))
+
+  const { rows: cdiRows } = await pool.query<{ prenom: string }>('SELECT prenom FROM cdi_agents')
+  const cdiAgents = cdiRows.map(r => r.prenom)
 
   const stats: Stats = { ops: 0, lignes: 0, errors: 0, skipped: 0 }
 
@@ -504,30 +536,31 @@ async function main() {
     console.log(`\n📂  ${path.basename(absPath)}`)
     const workbook = XLSX.readFile(absPath)
 
-    // Détecte le format
     const hasFFYSheets = workbook.SheetNames.some(n => n.startsWith('📋'))
 
     if (hasFFYSheets) {
-      processFFYFile(workbook, db, stats)
+      await processFFYFile(workbook, pool, stats)
     } else {
-      // Format Tableau de Marges
       for (const sheetName of workbook.SheetNames) {
-        processTableauFile(workbook, sheetName, db, stats, cdiAgents)
+        await processTableauFile(workbook, sheetName, pool, stats, cdiAgents)
       }
     }
   }
 
-  db.pragma('foreign_keys = ON')
+  const { rows: countRows } = await pool.query<{ nb_ops: string; nb_lignes: string }>(`
+    SELECT
+      (SELECT COUNT(*)::text FROM operations) as nb_ops,
+      (SELECT COUNT(*)::text FROM lignes_couts) as nb_lignes
+  `)
 
-  const nbOps = (db.prepare('SELECT COUNT(*) as n FROM operations').get() as { n: number }).n
-  const nbLignes = (db.prepare('SELECT COUNT(*) as n FROM lignes_couts').get() as { n: number }).n
+  const nbOps = Number(countRows[0]?.nb_ops ?? 0)
+  const nbLignes = Number(countRows[0]?.nb_lignes ?? 0)
 
-  const byYear = db.prepare(`
-    SELECT annee, COUNT(*) as nb_ops,
-           COUNT(CASE WHEN prix_vente_ht > 0 THEN 1 END) as nb_avec_ca,
-           ROUND(SUM(prix_vente_ht)) as ca
+  const { rows: byYear } = await pool.query<{ annee: number; nb_avec_ca: string; ca: string }>(`
+    SELECT annee, COUNT(CASE WHEN prix_vente_ht > 0 THEN 1 END)::text as nb_avec_ca,
+           ROUND(SUM(prix_vente_ht))::text as ca
     FROM operations GROUP BY annee ORDER BY annee
-  `).all() as { annee: number; nb_ops: number; nb_avec_ca: number; ca: number }[]
+  `)
 
   console.log(`
 ✅  Import terminé !
@@ -538,12 +571,13 @@ async function main() {
 📊  Répartition par année :`)
 
   for (const row of byYear) {
-    const ca = new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(row.ca)
+    const ca = new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(Number(row.ca))
     console.log(`   ${row.annee} : ${row.nb_avec_ca} opérations avec CA — ${ca}`)
   }
 
   console.log('\n💡  Lancez "npm run dev" puis ouvrez http://localhost:3000\n')
-  db.close()
+
+  await pool.end()
 }
 
 main().catch(e => { console.error('❌', e); process.exit(1) })

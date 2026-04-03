@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getDb } from '@/lib/db'
 
 export async function GET(req: NextRequest) {
-  const db = getDb()
+  const db = await getDb()
   const { searchParams } = new URL(req.url)
   const annee = Number(searchParams.get('annee') ?? new Date().getFullYear())
   const isAo = searchParams.get('is_ao') // '0', '1', or null (all)
@@ -11,10 +11,20 @@ export async function GET(req: NextRequest) {
   const aoClause = isAo === '0' ? 'AND o.is_ao = 0' : isAo === '1' ? 'AND o.is_ao = 1' : ''
 
   // Base query: operations with aggregated costs
-  function queryOps(anneeFilter?: number, aoFilter?: string) {
-    const af = anneeFilter !== undefined ? `AND o.annee = ${anneeFilter}` : ''
+  async function queryOps(anneeFilter?: number, aoFilter?: string) {
+    const clauses: string[] = ['o.prix_vente_ht > 0']
+    const params: number[] = []
+
+    if (anneeFilter !== undefined) {
+      params.push(anneeFilter)
+      clauses.push(`o.annee = $${params.length}`)
+    }
+
     const aof = aoFilter ?? aoClause
-    return db.prepare(`
+    if (aof.includes('o.is_ao = 0')) clauses.push('o.is_ao = 0')
+    if (aof.includes('o.is_ao = 1')) clauses.push('o.is_ao = 1')
+
+    const { rows } = await db.query(`
       SELECT
         o.id, o.mois, o.annee, o.client, o.is_ao, o.prix_vente_ht,
         COALESCE(SUM(COALESCE(lc.nb_heures,0)*COALESCE(lc.taux_horaire,0) + COALESCE(lc.cout_fixe,0)), 0) AS cout_total,
@@ -25,9 +35,11 @@ export async function GET(req: NextRequest) {
         COALESCE(SUM(CASE WHEN lc.type = 'DEPLACEMENT' THEN COALESCE(lc.nb_heures,0)*COALESCE(lc.taux_horaire,0) + COALESCE(lc.cout_fixe,0) ELSE 0 END), 0) AS cout_deplacement
       FROM operations o
       LEFT JOIN lignes_couts lc ON lc.operation_id = o.id
-      WHERE o.prix_vente_ht > 0 ${af} ${aof}
+      WHERE ${clauses.join(' AND ')}
       GROUP BY o.id
-    `).all() as OpRow[]
+    `, params)
+
+    return rows as OpRow[]
   }
 
   interface OpRow {
@@ -63,11 +75,11 @@ export async function GET(req: NextRequest) {
   }
 
   // Current year data
-  const currentRows = queryOps(annee)
+  const currentRows = await queryOps(annee)
   const kpis = agg(currentRows)
 
   // Previous year data (same AO filter)
-  const prevRows = queryOps(annee - 1)
+  const prevRows = await queryOps(annee - 1)
   const kpisPrev = agg(prevRows)
 
   // Monthly breakdown for current year
@@ -79,10 +91,12 @@ export async function GET(req: NextRequest) {
 
   // Multi-year comparison (all AO filters ignored here → show global)
   const annees = [2022, 2023, 2024, 2025, 2026]
-  const byAnnee = annees.map(y => {
-    const rows = queryOps(y, '') // no AO filter for comparison table
-    return { annee: y, ...agg(rows) }
-  })
+  const byAnnee = await Promise.all(
+    annees.map(async (y) => {
+      const rows = await queryOps(y, '') // no AO filter for comparison table
+      return { annee: y, ...agg(rows) }
+    })
+  )
 
   // AO vs Hors AO by month (current year)
   const aoByMonth = Array.from({ length: 12 }, (_, i) => {
@@ -97,47 +111,51 @@ export async function GET(req: NextRequest) {
   })
 
   // AO vs Hors AO by year
-  const aoByAnnee = annees.map(y => {
-    const allRows = queryOps(y, '')
-    const aoRows = allRows.filter(r => r.is_ao === 1)
-    const horsAoRows = allRows.filter(r => r.is_ao === 0)
-    return {
-      annee: y,
-      ao: agg(aoRows),
-      horsAo: agg(horsAoRows),
-    }
-  })
+  const aoByAnnee = await Promise.all(
+    annees.map(async (y) => {
+      const allRows = await queryOps(y, '')
+      const aoRows = allRows.filter(r => r.is_ao === 1)
+      const horsAoRows = allRows.filter(r => r.is_ao === 0)
+      return {
+        annee: y,
+        ao: agg(aoRows),
+        horsAo: agg(horsAoRows),
+      }
+    })
+  )
 
   // Multi-year monthly margin curves (for comparison chart)
-  const multiYearMonthly = annees.map(y => {
-    const rows = queryOps(y, '')
-    return {
-      annee: y,
-      monthly: Array.from({ length: 12 }, (_, i) => {
-        const m = i + 1
-        const mRows = rows.filter(r => r.mois === m)
-        const a = agg(mRows)
-        return { mois: m, margeBrute: a.margeBrute, margeExterne: a.margeExterne, ca: a.ca }
-      }),
-    }
-  })
+  const multiYearMonthly = await Promise.all(
+    annees.map(async (y) => {
+      const rows = await queryOps(y, '')
+      return {
+        annee: y,
+        monthly: Array.from({ length: 12 }, (_, i) => {
+          const m = i + 1
+          const mRows = rows.filter(r => r.mois === m)
+          const a = agg(mRows)
+          return { mois: m, margeBrute: a.margeBrute, margeExterne: a.margeExterne, ca: a.ca }
+        }),
+      }
+    })
+  )
 
   // Cadences par type de zone + poids de document (toutes années ou filtrée)
-  const cadenceByZone = db.prepare(`
+  const { rows: cadenceByZone } = await db.query(`
     SELECT
       c.type_zone,
       c.poids_document,
       COUNT(*) as nb_ops,
-      ROUND(AVG(CAST(c.nb_flyers AS REAL) / c.nb_heures)) as cadence_moy,
-      ROUND(MIN(CAST(c.nb_flyers AS REAL) / c.nb_heures)) as cadence_min,
-      ROUND(MAX(CAST(c.nb_flyers AS REAL) / c.nb_heures)) as cadence_max
+      ROUND(AVG((c.nb_flyers::numeric / c.nb_heures)::numeric)) as cadence_moy,
+      ROUND(MIN((c.nb_flyers::numeric / c.nb_heures)::numeric)) as cadence_min,
+      ROUND(MAX((c.nb_flyers::numeric / c.nb_heures)::numeric)) as cadence_max
     FROM cadences c
     JOIN operations o ON o.id = c.operation_id
     WHERE c.type_zone IS NOT NULL AND c.nb_flyers > 0 AND c.nb_heures > 0
       ${aoClause}
     GROUP BY c.type_zone, c.poids_document
     ORDER BY c.type_zone, c.poids_document
-  `).all() as { type_zone: string; poids_document: string | null; nb_ops: number; cadence_moy: number; cadence_min: number; cadence_max: number }[]
+  `)
 
   return NextResponse.json({
     annee,
@@ -148,6 +166,6 @@ export async function GET(req: NextRequest) {
     aoByMonth,
     aoByAnnee,
     multiYearMonthly,
-    cadenceByZone,
+    cadenceByZone: cadenceByZone as { type_zone: string; poids_document: string | null; nb_ops: number; cadence_moy: number; cadence_min: number; cadence_max: number }[],
   })
 }
