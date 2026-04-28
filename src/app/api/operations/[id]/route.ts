@@ -48,16 +48,17 @@ export async function PUT(req: NextRequest, { params }: Params) {
       if (body.cadence) {
         const c = body.cadence
         await clientConn.query(
-          `INSERT INTO cadences (operation_id, superficie, type_zone, nb_flyers, nb_heures, poids_document)
-           VALUES ($1, $2, $3, $4, $5, $6)
+          `INSERT INTO cadences (operation_id, superficie, type_zone, nb_flyers, nb_heures, poids_document, cadence_estimee)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
            ON CONFLICT(operation_id) DO UPDATE SET
              superficie=excluded.superficie,
              type_zone=excluded.type_zone,
              nb_flyers=excluded.nb_flyers,
              nb_heures=excluded.nb_heures,
              poids_document=excluded.poids_document,
+             cadence_estimee=excluded.cadence_estimee,
              updated_at=now()`,
-          [id, c.superficie ?? null, c.type_zone ?? null, c.nb_flyers ?? null, c.nb_heures ?? null, c.poids_document ?? null]
+          [id, c.superficie ?? null, c.type_zone ?? null, c.nb_flyers ?? null, c.nb_heures ?? null, c.poids_document ?? null, c.cadence_estimee ?? null]
         )
       } else {
         await clientConn.query('DELETE FROM cadences WHERE operation_id = $1', [id])

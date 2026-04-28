@@ -38,14 +38,18 @@ export async function GET(req: NextRequest) {
       c.nb_flyers,
       c.nb_heures AS cadence_heures,
       c.poids_document,
+      c.cadence_estimee,
       CASE WHEN c.nb_flyers > 0 AND c.nb_heures > 0
         THEN ROUND((c.nb_flyers::numeric / c.nb_heures)::numeric)
-        ELSE NULL END AS cadence_valeur
+        ELSE NULL END AS cadence_valeur,
+      CASE WHEN c.nb_flyers > 0 AND c.nb_heures > 0 AND c.cadence_estimee > 0
+        THEN ROUND(((c.nb_flyers::numeric / c.nb_heures) / c.cadence_estimee * 100)::numeric)
+        ELSE NULL END AS taux_atteinte
     FROM operations o
     LEFT JOIN lignes_couts lc ON lc.operation_id = o.id
     LEFT JOIN cadences c ON c.operation_id = o.id
     WHERE ${clauses.join(' AND ')}
-    GROUP BY o.id, c.type_zone, c.nb_flyers, c.nb_heures, c.poids_document
+    GROUP BY o.id, c.type_zone, c.nb_flyers, c.nb_heures, c.poids_document, c.cadence_estimee
     ORDER BY o.annee DESC, o.mois DESC, o.code
   `, params)
 
@@ -95,16 +99,17 @@ export async function POST(req: NextRequest) {
       if (body.cadence) {
         const c = body.cadence
         await clientConn.query(
-          `INSERT INTO cadences (operation_id, superficie, type_zone, nb_flyers, nb_heures, poids_document)
-           VALUES ($1, $2, $3, $4, $5, $6)
+          `INSERT INTO cadences (operation_id, superficie, type_zone, nb_flyers, nb_heures, poids_document, cadence_estimee)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
            ON CONFLICT(operation_id) DO UPDATE SET
              superficie=excluded.superficie,
              type_zone=excluded.type_zone,
              nb_flyers=excluded.nb_flyers,
              nb_heures=excluded.nb_heures,
              poids_document=excluded.poids_document,
+             cadence_estimee=excluded.cadence_estimee,
              updated_at=now()`,
-          [opId, c.superficie ?? null, c.type_zone ?? null, c.nb_flyers ?? null, c.nb_heures ?? null, c.poids_document ?? null]
+          [opId, c.superficie ?? null, c.type_zone ?? null, c.nb_flyers ?? null, c.nb_heures ?? null, c.poids_document ?? null, c.cadence_estimee ?? null]
         )
       }
 

@@ -8,11 +8,12 @@ interface Operation {
   id: number; code: string; mois: number; annee: number; client: string
   is_ao: number; prix_vente_ht: number; cout_total: number; cout_sans_cdi: number
   type_zone: string | null; cadence_valeur: number | null; poids_document: string | null
+  taux_atteinte: number | null
 }
 
 // ─── Définition des colonnes ──────────────────────────────────────────────────
 
-type ColId = 'periode' | 'code' | 'client' | 'type' | 'ca' | 'benefice' | 'cout' | 'mb' | 'me' | 'cadence' | 'actions'
+type ColId = 'periode' | 'code' | 'client' | 'type' | 'ca' | 'benefice' | 'cout' | 'mb' | 'me' | 'cadence' | 'atteinte' | 'actions'
 
 interface ColDef {
   id: ColId
@@ -33,10 +34,11 @@ const ALL_COLS: ColDef[] = [
   { id: 'mb',       label: 'M. Brute',   sortable: true,  align: 'center', width: '90px'  },
   { id: 'me',       label: 'M. Externe', sortable: true,  align: 'center', width: '90px'  },
   { id: 'cadence',  label: 'Cadence',    sortable: true,  align: 'center', width: '100px' },
+  { id: 'atteinte', label: '% Atteinte', sortable: true,  align: 'center', width: '100px' },
   { id: 'actions',  label: 'Actions',    sortable: false, align: 'center', width: '110px' },
 ]
 
-type SortKey = 'code' | 'client' | 'periode' | 'ca' | 'benefice' | 'mb' | 'me' | 'cadence'
+type SortKey = 'code' | 'client' | 'periode' | 'ca' | 'benefice' | 'mb' | 'me' | 'cadence' | 'atteinte'
 type SortDir = 'asc' | 'desc'
 
 // ─── Composant principal ──────────────────────────────────────────────────────
@@ -63,7 +65,7 @@ export default function OperationsPage() {
   const [sortDir, setSortDir] = useState<SortDir>('desc')
 
   // Ordre des colonnes
-  const [colOrder, setColOrder] = useState<ColId[]>(ALL_COLS.map(c => c.id).filter(id => id !== 'client'))
+  const [colOrder, setColOrder] = useState<ColId[]>(ALL_COLS.map(c => c.id).filter(id => id !== 'client' && id !== 'atteinte').concat(['atteinte']))
 
   // Drag state
   const dragCol = useRef<ColId | null>(null)
@@ -121,6 +123,7 @@ export default function OperationsPage() {
         vb = b.prix_vente_ht > 0 ? (b.prix_vente_ht - b.cout_sans_cdi) / b.prix_vente_ht : -999
         break
       case 'cadence': va = a.cadence_valeur ?? -1; vb = b.cadence_valeur ?? -1; break
+      case 'atteinte': va = a.taux_atteinte ?? -1; vb = b.taux_atteinte ?? -1; break
     }
     if (va < vb) return sortDir === 'asc' ? -1 : 1
     if (va > vb) return sortDir === 'asc' ? 1 : -1
@@ -271,6 +274,24 @@ export default function OperationsPage() {
                   <span className="text-xs text-slate-500 font-mono">{op.type_zone}</span>
                 )}
               </div>
+            ) : (
+              <span className="text-slate-600 text-sm">—</span>
+            )}
+          </td>
+        )
+      case 'atteinte':
+        return (
+          <td key={col.id} className="px-3 py-2.5 text-center">
+            {op.taux_atteinte != null ? (
+              <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${
+                op.taux_atteinte >= 100
+                  ? 'bg-green-500/20 text-green-400 ring-1 ring-green-500/40'
+                  : op.taux_atteinte >= 80
+                  ? 'bg-orange-500/20 text-orange-400 ring-1 ring-orange-500/40'
+                  : 'bg-red-500/20 text-red-400 ring-1 ring-red-500/40'
+              }`}>
+                {op.taux_atteinte}%
+              </span>
             ) : (
               <span className="text-slate-600 text-sm">—</span>
             )}

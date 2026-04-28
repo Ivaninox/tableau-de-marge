@@ -81,9 +81,12 @@ async function initDb(db: Pool) {
       nb_flyers INTEGER,
       nb_heures DOUBLE PRECISION,
       poids_document TEXT,
+      cadence_estimee DOUBLE PRECISION,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+
+    ALTER TABLE cadences ADD COLUMN IF NOT EXISTS cadence_estimee DOUBLE PRECISION;
 
     CREATE INDEX IF NOT EXISTS idx_operations_annee ON operations(annee);
     CREATE INDEX IF NOT EXISTS idx_operations_mois ON operations(mois, annee);

@@ -45,6 +45,7 @@ interface CadenceForm {
   nb_flyers: string
   nb_heures: string
   poids_document: string
+  cadence_estimee: string
 }
 
 interface FormData {
@@ -92,7 +93,7 @@ interface Props {
     code: string; mois: number; annee: number; client: string; is_ao: number
     prix_vente_ht: number; notes: string | null
     lignes: Array<{ type: string; intitule: string; nb_heures: number | null; taux_horaire: number | null; cout_fixe: number | null }>
-    cadence?: { superficie: number | null; type_zone: string | null; nb_flyers: number | null; nb_heures: number | null; poids_document: string | null } | null
+    cadence?: { superficie: number | null; type_zone: string | null; nb_flyers: number | null; nb_heures: number | null; poids_document: string | null; cadence_estimee: number | null } | null
   }
 }
 
@@ -196,6 +197,7 @@ export default function OperationForm({ initialData }: Props) {
           nb_flyers: cad?.nb_flyers != null ? String(cad.nb_flyers) : '',
           nb_heures: cad?.nb_heures != null ? String(cad.nb_heures) : '',
           poids_document: cad?.poids_document ?? '',
+          cadence_estimee: cad?.cadence_estimee != null ? String(cad.cadence_estimee) : '',
         },
       }
     }
@@ -203,7 +205,7 @@ export default function OperationForm({ initialData }: Props) {
     return {
       code: '', mois: now.getMonth() + 1, annee: now.getFullYear(),
       client: '', is_ao: false, prix_vente_ht: '', notes: '', lignes: [newLigne()],
-      cadence: { superficie: '', type_zone: '', nb_flyers: '', nb_heures: '', poids_document: '' },
+      cadence: { superficie: '', type_zone: '', nb_flyers: '', nb_heures: '', poids_document: '', cadence_estimee: '' },
     }
   })
 
@@ -224,6 +226,10 @@ export default function OperationForm({ initialData }: Props) {
   const cadenceHeures = Number(form.cadence.nb_heures) || 0
   const cadenceResult = cadenceFlyers > 0 && cadenceHeures > 0
     ? Math.round(cadenceFlyers / cadenceHeures)
+    : null
+  const cadenceEstimee = Number(form.cadence.cadence_estimee) || 0
+  const tauxAtteinte = cadenceResult !== null && cadenceEstimee > 0
+    ? Math.round((cadenceResult / cadenceEstimee) * 100)
     : null
 
   function setField<K extends keyof FormData>(k: K, v: FormData[K]) {
@@ -252,12 +258,13 @@ export default function OperationForm({ initialData }: Props) {
     setSaving(true)
 
     const cad = form.cadence
-    const cadencePayload = (cad.nb_flyers || cad.nb_heures || cad.superficie || cad.type_zone || cad.poids_document) ? {
+    const cadencePayload = (cad.nb_flyers || cad.nb_heures || cad.superficie || cad.type_zone || cad.poids_document || cad.cadence_estimee) ? {
       superficie: cad.superficie ? Number(cad.superficie) : null,
       type_zone: cad.type_zone || null,
       nb_flyers: cad.nb_flyers ? Number(cad.nb_flyers) : null,
       nb_heures: cad.nb_heures ? Number(cad.nb_heures) : null,
       poids_document: cad.poids_document || null,
+      cadence_estimee: cad.cadence_estimee ? Number(cad.cadence_estimee) : null,
     } : null
 
     const payload = {
@@ -431,7 +438,7 @@ export default function OperationForm({ initialData }: Props) {
                   />
 
                   <input
-                    type="number" min="0" step="0.5"
+                    type="number" min="0" step="any"
                     value={l.nb_heures}
                     onChange={e => setLigne(l.id, 'nb_heures', e.target.value)}
                     placeholder="0"
@@ -518,7 +525,7 @@ export default function OperationForm({ initialData }: Props) {
           <div>
             <label className="block text-xs font-medium text-slate-400 mb-1.5">Heures terrain</label>
             <input
-              type="number" min="0" step="0.5"
+              type="number" min="0" step="any"
               value={form.cadence.nb_heures}
               onChange={e => setCadence('nb_heures', e.target.value)}
               placeholder="ex: 8"
@@ -540,17 +547,27 @@ export default function OperationForm({ initialData }: Props) {
               ))}
             </select>
           </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1.5">Cadence estimée (flyers/h)</label>
+            <input
+              type="number" min="0" step="1"
+              value={form.cadence.cadence_estimee}
+              onChange={e => setCadence('cadence_estimee', e.target.value)}
+              placeholder="ex: 1000"
+              className="w-full bg-slate-900 border border-slate-600 text-white rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            />
+          </div>
         </div>
 
         {/* Résultat cadence */}
-        <div className="mt-4 flex items-center gap-3">
+        <div className="mt-4 flex flex-wrap items-center gap-3">
           <div className={clsx(
             'flex items-center gap-3 px-4 py-3 rounded-xl border transition-colors',
             cadenceResult !== null
               ? 'bg-indigo-900/30 border-indigo-500/40'
               : 'bg-slate-900/40 border-slate-700'
           )}>
-            <div className="text-xs font-medium text-slate-400 uppercase">Cadence</div>
+            <div className="text-xs font-medium text-slate-400 uppercase">Cadence réelle</div>
             <div className={clsx(
               'text-xl font-bold',
               cadenceResult !== null ? 'text-indigo-300' : 'text-slate-600'
@@ -558,6 +575,22 @@ export default function OperationForm({ initialData }: Props) {
               {cadenceResult !== null ? `${cadenceResult.toLocaleString('fr-FR')} flyers/h` : '—'}
             </div>
           </div>
+
+          {tauxAtteinte !== null && (
+            <div className={clsx(
+              'flex items-center gap-3 px-4 py-3 rounded-xl border transition-colors',
+              tauxAtteinte >= 100 ? 'bg-green-900/30 border-green-500/40' : tauxAtteinte >= 80 ? 'bg-orange-900/30 border-orange-500/40' : 'bg-red-900/30 border-red-500/40'
+            )}>
+              <div className="text-xs font-medium text-slate-400 uppercase">Atteinte</div>
+              <div className={clsx(
+                'text-xl font-bold',
+                tauxAtteinte >= 100 ? 'text-green-400' : tauxAtteinte >= 80 ? 'text-orange-400' : 'text-red-400'
+              )}>
+                {tauxAtteinte}%
+              </div>
+            </div>
+          )}
+
           {form.cadence.type_zone && (
             <div className="text-xs text-slate-500">
               Zone <span className="text-slate-300 font-medium">{form.cadence.type_zone}</span>
