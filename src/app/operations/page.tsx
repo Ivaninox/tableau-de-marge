@@ -65,7 +65,7 @@ export default function OperationsPage() {
   const [sortDir, setSortDir] = useState<SortDir>('desc')
 
   // Ordre des colonnes
-  const [colOrder, setColOrder] = useState<ColId[]>(ALL_COLS.map(c => c.id).filter(id => id !== 'client' && id !== 'atteinte').concat(['atteinte']))
+  const [colOrder, setColOrder] = useState<ColId[]>(ALL_COLS.map(c => c.id).filter(id => id !== 'client'))
 
   // Drag state
   const dragCol = useRef<ColId | null>(null)
